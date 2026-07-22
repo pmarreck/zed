@@ -4,12 +4,16 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         // Compile HLSL shaders
-        #[cfg(not(debug_assertions))]
+        #[cfg(all(not(debug_assertions), not(feature = "runtime_shaders")))]
         compile_shaders();
     }
 }
 
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
+#[cfg(all(
+    target_os = "windows",
+    not(debug_assertions),
+    not(feature = "runtime_shaders")
+))]
 mod shader_compilation {
     use std::{
         fs,
