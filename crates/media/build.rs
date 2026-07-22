@@ -1,22 +1,33 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
-#[cfg(target_os = "macos")]
-fn main() {
-    use std::{env, path::PathBuf, process::Command};
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{env, io, path::PathBuf, process::Command};
 
-    let sdk_path = String::from_utf8(
-        Command::new("xcrun")
-            .args(["--sdk", "macosx", "--show-sdk-path"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let sdk_path = sdk_path.trim_end();
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return Ok(());
+    }
+
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    let sdk_path = match env::var("SDKROOT") {
+        Ok(sdk_path) => sdk_path,
+        Err(_) => {
+            let output = Command::new("xcrun")
+                .args(["--sdk", "macosx", "--show-sdk-path"])
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "xcrun could not locate the macOS SDK: {}",
+                    String::from_utf8_lossy(&output.stderr).trim_end()
+                ))
+                .into());
+            }
+            String::from_utf8(output.stdout)?.trim_end().to_owned()
+        }
+    };
 
     println!("cargo:rerun-if-changed=src/bindings.h");
-    let bindings = bindgen::Builder::default()
+    let mut bindings = bindgen::Builder::default()
         .header("src/bindings.h")
-        .clang_arg(format!("-isysroot{}", sdk_path))
+        .clang_arg(format!("-isysroot{sdk_path}"))
         .clang_arg("-xobjective-c")
         .allowlist_type("CMItemIndex")
         .allowlist_type("CMSampleTimingInfo")
@@ -30,15 +41,16 @@ fn main() {
         .allowlist_var("kCMTime.*")
         .allowlist_var("kCMSampleAttachmentKey_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .layout_tests(false)
+        .layout_tests(false);
+    if let Ok(target) = env::var("TARGET") {
+        bindings = bindings.clang_arg(format!("--target={target}"));
+    }
+    let bindings = bindings
         .generate()
-        .expect("unable to generate bindings");
+        .map_err(|error| io::Error::other(format!("unable to generate bindings: {error}")))?;
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("couldn't write dispatch bindings");
+    let out_path = PathBuf::from(env::var("OUT_DIR")?);
+    bindings.write_to_file(out_path.join("bindings.rs"))?;
+
+    Ok(())
 }
-
-#[cfg(not(target_os = "macos"))]
-fn main() {}
