@@ -58,6 +58,7 @@ impl WebWindowInner {
         let mut closures = vec![
             self.register_pointer_down(),
             self.register_pointer_up(),
+            self.register_pointer_cancel(),
             self.register_mouse_down(),
             self.register_mouse_up(),
             self.register_pointer_move(),
@@ -163,6 +164,21 @@ impl WebWindowInner {
                 return;
             }
             event.prevent_default();
+            this.dispatch_mouse_up(event.as_ref());
+        })
+    }
+
+    fn register_pointer_cancel(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
+        let this = Rc::clone(self);
+        self.listen("pointercancel", move |event: JsValue| {
+            let event: web_sys::PointerEvent = event.unchecked_into();
+            if !should_handle_pointer_button_event(&event.pointer_type()) {
+                return;
+            }
+            event.prevent_default();
+            // GPUI has no separate pointer-cancel platform input. Treat a
+            // cancelled touch/pen contact as an up edge so clients cannot
+            // retain a logically pressed primary button indefinitely.
             this.dispatch_mouse_up(event.as_ref());
         })
     }
