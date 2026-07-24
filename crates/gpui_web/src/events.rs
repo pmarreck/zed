@@ -9,7 +9,10 @@ use gpui::{
 use smallvec::smallvec;
 use wasm_bindgen::prelude::*;
 
-use crate::window::WebWindowInner;
+use crate::{
+    mouse_buttons::{dom_button_from_buttons, should_handle_pointer_button_event},
+    window::WebWindowInner,
+};
 
 pub struct WebEventListeners {
     #[allow(dead_code)]
@@ -55,6 +58,8 @@ impl WebWindowInner {
         let mut closures = vec![
             self.register_pointer_down(),
             self.register_pointer_up(),
+            self.register_mouse_down(),
+            self.register_mouse_up(),
             self.register_pointer_move(),
             self.register_pointer_leave(),
             self.register_wheel(),
@@ -133,30 +138,19 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointerdown", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
-            event.prevent_default();
-            this.input_element.focus().ok();
-
-            let button = dom_mouse_button_to_gpui(event.button());
-            let position = pointer_position_in_element(&event);
-            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
-            let time = js_sys::Date::now();
-
-            this.pressed_button.set(Some(button));
-            let click_count = this.click_state.borrow_mut().register_click(position, time);
-
-            {
-                let mut current_state = this.state.borrow_mut();
-                current_state.mouse_position = position;
-                current_state.modifiers = modifiers;
+            // A pointer event collapses all mouse buttons into a single
+            // active/inactive transition, so a chord's intermediate button
+            // release never fires here. Mouse input is instead handled
+            // per-button by the `mousedown`/`mouseup` listeners; ignore it on
+            // this path. Touch and pen have no per-button model, so they keep
+            // using this path, and `preventDefault()` below cancels the
+            // compatibility mouse events they would otherwise emit, avoiding a
+            // double dispatch.
+            if !should_handle_pointer_button_event(&event.pointer_type()) {
+                return;
             }
-
-            this.dispatch_input(PlatformInput::MouseDown(MouseDownEvent {
-                button,
-                position,
-                modifiers,
-                click_count,
-                first_mouse: false,
-            }));
+            event.prevent_default();
+            this.dispatch_mouse_down(event.as_ref());
         })
     }
 
@@ -164,28 +158,82 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointerup", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
-            event.prevent_default();
-
-            let button = dom_mouse_button_to_gpui(event.button());
-            let position = pointer_position_in_element(&event);
-            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
-
-            this.pressed_button.set(None);
-            let click_count = this.click_state.borrow().current_count;
-
-            {
-                let mut current_state = this.state.borrow_mut();
-                current_state.mouse_position = position;
-                current_state.modifiers = modifiers;
+            if !should_handle_pointer_button_event(&event.pointer_type()) {
+                return;
             }
-
-            this.dispatch_input(PlatformInput::MouseUp(MouseUpEvent {
-                button,
-                position,
-                modifiers,
-                click_count,
-            }));
+            event.prevent_default();
+            this.dispatch_mouse_up(event.as_ref());
         })
+    }
+
+    fn register_mouse_down(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
+        let this = Rc::clone(self);
+        self.listen("mousedown", move |event: JsValue| {
+            let event: web_sys::MouseEvent = event.unchecked_into();
+            event.prevent_default();
+            this.dispatch_mouse_down(&event);
+        })
+    }
+
+    fn register_mouse_up(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
+        let this = Rc::clone(self);
+        self.listen("mouseup", move |event: JsValue| {
+            let event: web_sys::MouseEvent = event.unchecked_into();
+            event.prevent_default();
+            this.dispatch_mouse_up(&event);
+        })
+    }
+
+    fn dispatch_mouse_down(&self, event: &web_sys::MouseEvent) {
+        // Ordinary content presses must not focus the hidden text `<input>`.
+        // On iOS Safari a programmatic `focus()` inside a trusted pointer
+        // gesture summons the software keyboard even when no text field is
+        // shown. Hardware keyboard and IME still work: the input is focused
+        // once at startup and `preventDefault()` on the press keeps focus on
+        // it, so the keydown/composition listeners keep receiving events. A
+        // future text/IME handler can still focus it deliberately when text
+        // entry is actually requested.
+        let button = dom_mouse_button_to_gpui(event.button());
+        let position = mouse_position_in_element(event);
+        let modifiers = modifiers_from_mouse_event(event, self.is_mac);
+        let time = js_sys::Date::now();
+
+        let click_count = self.click_state.borrow_mut().register_click(position, time);
+
+        {
+            let mut current_state = self.state.borrow_mut();
+            current_state.mouse_position = position;
+            current_state.modifiers = modifiers;
+        }
+
+        self.dispatch_input(PlatformInput::MouseDown(MouseDownEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        }));
+    }
+
+    fn dispatch_mouse_up(&self, event: &web_sys::MouseEvent) {
+        let button = dom_mouse_button_to_gpui(event.button());
+        let position = mouse_position_in_element(event);
+        let modifiers = modifiers_from_mouse_event(event, self.is_mac);
+
+        let click_count = self.click_state.borrow().current_count;
+
+        {
+            let mut current_state = self.state.borrow_mut();
+            current_state.mouse_position = position;
+            current_state.modifiers = modifiers;
+        }
+
+        self.dispatch_input(PlatformInput::MouseUp(MouseUpEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+        }));
     }
 
     fn register_pointer_move(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
@@ -195,8 +243,9 @@ impl WebWindowInner {
             event.prevent_default();
 
             let position = pointer_position_in_element(&event);
-            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
-            let current_pressed = this.pressed_button.get();
+            let modifiers = modifiers_from_mouse_event(event.as_ref(), this.is_mac);
+            let current_pressed =
+                dom_button_from_buttons(event.buttons()).map(dom_mouse_button_to_gpui);
 
             {
                 let mut current_state = this.state.borrow_mut();
@@ -218,8 +267,9 @@ impl WebWindowInner {
             let event: web_sys::PointerEvent = event.unchecked_into();
 
             let position = pointer_position_in_element(&event);
-            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
-            let current_pressed = this.pressed_button.get();
+            let modifiers = modifiers_from_mouse_event(event.as_ref(), this.is_mac);
+            let current_pressed =
+                dom_button_from_buttons(event.buttons()).map(dom_mouse_button_to_gpui);
 
             {
                 let mut current_state = this.state.borrow_mut();
@@ -574,13 +624,12 @@ fn modifiers_from_keyboard_event(event: &web_sys::KeyboardEvent, _is_mac: bool) 
     }
 }
 
-fn modifiers_from_mouse_event(event: &web_sys::PointerEvent, _is_mac: bool) -> Modifiers {
-    let mouse_event: &web_sys::MouseEvent = event.as_ref();
+fn modifiers_from_mouse_event(event: &web_sys::MouseEvent, _is_mac: bool) -> Modifiers {
     Modifiers {
-        control: mouse_event.ctrl_key(),
-        alt: mouse_event.alt_key(),
-        shift: mouse_event.shift_key(),
-        platform: mouse_event.meta_key(),
+        control: event.ctrl_key(),
+        alt: event.alt_key(),
+        shift: event.shift_key(),
+        platform: event.meta_key(),
         function: false,
     }
 }
