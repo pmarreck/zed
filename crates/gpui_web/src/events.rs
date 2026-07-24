@@ -172,6 +172,11 @@ impl WebWindowInner {
         self.listen("mousedown", move |event: JsValue| {
             let event: web_sys::MouseEvent = event.unchecked_into();
             event.prevent_default();
+            // Restore hardware-keyboard delivery only for a real mouse edge.
+            // Touch and pen stay on the pointer path, whose `preventDefault`
+            // suppresses their compatibility mouse event, so an iOS tap never
+            // focuses the editable hidden input and summons its soft keyboard.
+            this.input_element.focus().ok();
             this.dispatch_mouse_down(&event);
         })
     }
@@ -186,14 +191,13 @@ impl WebWindowInner {
     }
 
     fn dispatch_mouse_down(&self, event: &web_sys::MouseEvent) {
-        // Ordinary content presses must not focus the hidden text `<input>`.
-        // On iOS Safari a programmatic `focus()` inside a trusted pointer
-        // gesture summons the software keyboard even when no text field is
-        // shown. Hardware keyboard and IME still work: the input is focused
-        // once at startup and `preventDefault()` on the press keeps focus on
-        // it, so the keydown/composition listeners keep receiving events. A
-        // future text/IME handler can still focus it deliberately when text
-        // entry is actually requested.
+        // Touch and pen content presses must not focus the hidden text
+        // `<input>`. On iOS Safari a programmatic `focus()` inside a trusted
+        // pointer gesture summons the software keyboard even when no text field
+        // is shown. Real mouse edges refocus it in `register_mouse_down`, while
+        // touch and pen retain startup focus through `preventDefault()`. A future
+        // text/IME handler can still focus it deliberately when text entry is
+        // actually requested.
         let button = dom_mouse_button_to_gpui(event.button());
         let position = mouse_position_in_element(event);
         let modifiers = modifiers_from_mouse_event(event, self.is_mac);
