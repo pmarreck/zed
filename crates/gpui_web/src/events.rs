@@ -108,6 +108,27 @@ impl WebWindowInner {
         closure
     }
 
+    /// Registers a listener on the document rather than on a single element.
+    ///
+    /// Key events must reach GPUI no matter which element currently owns focus:
+    /// the canvas while the application is not asking for text, the editable
+    /// input while a text/IME handler is active. Listening on either element
+    /// alone would silently drop keys in the other state, which is how an
+    /// earlier attempt to stop focusing the input broke hardware key delivery.
+    fn listen_document(
+        self: &Rc<Self>,
+        event_name: &str,
+        handler: impl FnMut(JsValue) + 'static,
+    ) -> Closure<dyn FnMut(JsValue)> {
+        let closure = Closure::<dyn FnMut(JsValue)>::new(handler);
+        if let Some(document) = self.canvas.owner_document() {
+            document
+                .add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())
+                .ok();
+        }
+        closure
+    }
+
     /// Registers a listener with `{passive: false}` so that `preventDefault()` works.
     /// Needed for events like `wheel` which are passive by default in modern browsers.
     fn listen_non_passive(
@@ -187,11 +208,12 @@ impl WebWindowInner {
         self.listen("mousedown", move |event: JsValue| {
             let event: web_sys::MouseEvent = event.unchecked_into();
             event.prevent_default();
-            // Restore hardware-keyboard delivery only for a real mouse edge.
-            // Touch and pen stay on the pointer path, whose `preventDefault`
-            // suppresses their compatibility mouse event, so an iOS tap never
-            // focuses the editable hidden input and summons its soft keyboard.
-            this.input_element.focus().ok();
+            // Restore focus to whichever element the policy nominates, so a
+            // real mouse press recovers key delivery after focus moved
+            // elsewhere. This focuses the editable input only while a text/IME
+            // handler is active, so it can never summon a software keyboard for
+            // ordinary canvas interaction.
+            this.apply_focus_host();
             this.dispatch_mouse_down(&event);
         })
     }
@@ -398,7 +420,7 @@ impl WebWindowInner {
 
     fn register_key_down(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
         let this = Rc::clone(self);
-        self.listen_input("keydown", move |event: JsValue| {
+        self.listen_document("keydown", move |event: JsValue| {
             let event: web_sys::KeyboardEvent = event.unchecked_into();
 
             let modifiers = modifiers_from_keyboard_event(&event, this.is_mac);
@@ -460,7 +482,7 @@ impl WebWindowInner {
 
     fn register_key_up(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
         let this = Rc::clone(self);
-        self.listen_input("keyup", move |event: JsValue| {
+        self.listen_document("keyup", move |event: JsValue| {
             let event: web_sys::KeyboardEvent = event.unchecked_into();
 
             let modifiers = modifiers_from_keyboard_event(&event, this.is_mac);

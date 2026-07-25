@@ -1,5 +1,6 @@
 use crate::display::WebDisplay;
 use crate::events::{ClickState, WebEventListeners, is_mac_platform};
+use crate::focus_policy::{FocusHost, focus_host};
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
@@ -129,7 +130,15 @@ impl WebWindow {
         input_style.set_property("opacity", "0").ok();
         body.append_child(&input_element)
             .map_err(|e| anyhow::anyhow!("Failed to append input to body: {e:?}"))?;
-        input_element.focus().ok();
+        // Focus the canvas, never the editable input. A touch platform presents
+        // its software keyboard whenever an editable element holds focus, so
+        // focusing the hidden `<input>` here made every tap summon the iOS
+        // keyboard even for an application with no text control. The canvas is
+        // made focusable by the `tabindex` below and is not editable, so it delivers
+        // hardware keys silently. The editable input is focused only while a
+        // GPUI text/IME input handler is active; see `set_input_handler`.
+        canvas.set_tab_index(-1);
+        canvas.focus().ok();
 
         let device_size = Size {
             width: DevicePixels(0),
@@ -406,6 +415,32 @@ impl WebWindowInner {
         Some(closure)
     }
 
+    /// Whether a GPUI text/IME input handler is currently installed. This is
+    /// the platform-level meaning of "the application is asking for text", and
+    /// it is what decides whether an editable element may hold DOM focus.
+    pub(crate) fn text_input_active(&self) -> bool {
+        self.state.borrow().input_handler.is_some()
+    }
+
+    /// Moves DOM focus to whichever element the focus policy nominates. Called
+    /// whenever the text/IME lifecycle changes and after a real mouse press, so
+    /// the editable input is focused exactly while text entry is active and the
+    /// canvas owns focus the rest of the time.
+    pub(crate) fn apply_focus_host(&self) {
+        match focus_host(self.text_input_active()) {
+            FocusHost::TextInput => {
+                self.input_element.focus().ok();
+            }
+            FocusHost::Canvas => {
+                // Blur first: on a touch platform the software keyboard stays up
+                // while the editable element keeps focus, so moving focus to the
+                // canvas is what actually dismisses it.
+                self.input_element.blur().ok();
+                self.canvas.focus().ok();
+            }
+        }
+    }
+
     pub(crate) fn with_input_handler<R>(
         &self,
         f: impl FnOnce(&mut PlatformInputHandler) -> R,
@@ -553,12 +588,20 @@ impl PlatformWindow for WebWindow {
         self.inner.state.borrow().capslock
     }
 
+    /// GPUI calls this when a real text/IME control takes focus, so this is the
+    /// one moment an editable element may legitimately own DOM focus — and the
+    /// only way a software keyboard should ever be summoned.
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
         self.inner.state.borrow_mut().input_handler = Some(input_handler);
+        self.inner.apply_focus_host();
     }
 
+    /// Text entry ended, so focus returns to the non-editable canvas and the
+    /// software keyboard dismisses. Hardware keys keep working throughout.
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
-        self.inner.state.borrow_mut().input_handler.take()
+        let handler = self.inner.state.borrow_mut().input_handler.take();
+        self.inner.apply_focus_host();
+        handler
     }
 
     fn prompt(
