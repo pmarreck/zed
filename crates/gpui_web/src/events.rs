@@ -121,11 +121,18 @@ impl WebWindowInner {
         handler: impl FnMut(JsValue) + 'static,
     ) -> Closure<dyn FnMut(JsValue)> {
         let closure = Closure::<dyn FnMut(JsValue)>::new(handler);
-        if let Some(document) = self.canvas.owner_document() {
-            document
-                .add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())
-                .ok();
-        }
+        // Always attach somewhere. A missing owner document would otherwise
+        // register no listener at all and silently drop every key, which is the
+        // same shape of quiet failure that let the software-keyboard defect
+        // ship. The canvas is guaranteed to exist here, so it is the floor.
+        let owner_document = self.canvas.owner_document();
+        let target: &web_sys::EventTarget = match owner_document {
+            Some(ref document) => document.unchecked_ref(),
+            None => self.canvas.as_ref(),
+        };
+        target
+            .add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())
+            .ok();
         closure
     }
 
