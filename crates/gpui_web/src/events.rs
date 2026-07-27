@@ -467,10 +467,10 @@ impl WebWindowInner {
                 prefer_character_input: false,
             }));
 
-            if let Some(result) = result {
-                if !result.propagate {
-                    return;
-                }
+            let propagate = result.as_ref().map(|result| result.propagate);
+            if propagate == Some(false) {
+                web_sys::console::error_1(&"AEDICULE_KEYDIAG consumed_by_gpui".into());
+                return;
             }
 
             if this.is_composing.get() || event.is_composing() {
@@ -479,10 +479,21 @@ impl WebWindowInner {
 
             if modifiers.is_subset_of(&Modifiers::shift()) {
                 if let Some(text) = key_char {
-                    this.with_input_handler(|handler| {
+                    let inserted = this.with_input_handler(|handler| {
                         handler.replace_text_in_range(None, &text);
                     });
+                    web_sys::console::error_1(&format!(
+                        "AEDICULE_KEYDIAG text={text:?} propagate={:?} inserted={}",
+                        propagate,
+                        inserted.is_some()
+                    ).into());
+                } else {
+                    web_sys::console::error_1(&format!(
+                        "AEDICULE_KEYDIAG no_key_char propagate={propagate:?}"
+                    ).into());
                 }
+            } else {
+                web_sys::console::error_1(&"AEDICULE_KEYDIAG modifiers_blocked".into());
             }
         })
     }
