@@ -1,6 +1,6 @@
 use crate::display::WebDisplay;
 use crate::events::{ClickState, WebEventListeners, is_mac_platform};
-use crate::focus_policy::{FocusHost, focus_host};
+use crate::focus_policy::{FocusHost, FocusOwner, focus_transition};
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
@@ -426,8 +426,34 @@ impl WebWindowInner {
     /// whenever the text/IME lifecycle changes and after a real mouse press, so
     /// the editable input is focused exactly while text entry is active and the
     /// canvas owns focus the rest of the time.
+    /// Reads which of this window's elements the document currently focuses,
+    /// so the policy can be applied idempotently rather than on every call.
+    fn focus_owner(&self) -> FocusOwner {
+        let active = self
+            .canvas
+            .owner_document()
+            .and_then(|document| document.active_element());
+        match active {
+            Some(ref element) if element.is_same_node(Some(self.input_element.as_ref())) => {
+                FocusOwner::TextInput
+            }
+            Some(ref element) if element.is_same_node(Some(self.canvas.as_ref())) => {
+                FocusOwner::Canvas
+            }
+            _ => FocusOwner::Neither,
+        }
+    }
+
     pub(crate) fn apply_focus_host(&self) {
-        match focus_host(self.text_input_active()) {
+        // Do nothing when the DOM already satisfies the policy. GPUI installs
+        // and removes its input handler as part of ordinary rendering, so an
+        // unconditional focus()/blur() here fires synchronous DOM focus events
+        // every frame, whose listeners re-enter GPUI and provoke another
+        // render — an unbounded loop that panics the runtime.
+        let Some(host) = focus_transition(self.text_input_active(), self.focus_owner()) else {
+            return;
+        };
+        match host {
             FocusHost::TextInput => {
                 self.input_element.focus().ok();
             }

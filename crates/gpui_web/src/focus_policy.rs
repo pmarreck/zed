@@ -38,8 +38,90 @@ pub(super) fn focus_host(text_input_active: bool) -> FocusHost {
     }
 }
 
+/// Which of this window's elements currently owns DOM focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusOwner {
+    TextInput,
+    Canvas,
+    /// Neither — `document.body` at startup, or an element outside this window.
+    Neither,
+}
+
+/// Returns the focus move required to satisfy the policy, or `None` when the
+/// DOM already satisfies it.
+///
+/// Idempotence is load-bearing, not a micro-optimization. GPUI installs and
+/// removes its input handler as part of ordinary rendering, so applying focus
+/// unconditionally calls `focus()`/`blur()` every frame. Each call fires
+/// synchronous DOM focus events, whose listeners re-enter GPUI and provoke
+/// another render — an unbounded re-entrant loop that panics the runtime.
+pub(super) fn focus_transition(text_input_active: bool, owner: FocusOwner) -> Option<FocusHost> {
+    // Nomination stays the single source of truth; this only adds "already
+    // there, so do not touch the DOM".
+    let nominated = focus_host(text_input_active);
+    let satisfied = matches!(
+        (nominated, owner),
+        (FocusHost::TextInput, FocusOwner::TextInput) | (FocusHost::Canvas, FocusOwner::Canvas)
+    );
+    if satisfied { None } else { Some(nominated) }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{FocusHost, FocusOwner, focus_host, focus_transition};
+
+    /// 2 x 3 is a finite domain, so this exhausts it rather than sampling it.
+    #[test]
+    fn focus_transition_is_exhaustively_classified_over_the_complete_domain() {
+        let cases = [
+            (false, FocusOwner::Neither, Some(FocusHost::Canvas)),
+            (false, FocusOwner::Canvas, None),
+            (false, FocusOwner::TextInput, Some(FocusHost::Canvas)),
+            (true, FocusOwner::Neither, Some(FocusHost::TextInput)),
+            (true, FocusOwner::Canvas, Some(FocusHost::TextInput)),
+            (true, FocusOwner::TextInput, None),
+        ];
+        for (text_input_active, owner, expected) in cases {
+            assert_eq!(
+                focus_transition(text_input_active, owner),
+                expected,
+                "active={text_input_active} owner={owner:?}",
+            );
+        }
+    }
+
+    /// The property that keeps the runtime alive: once the DOM already agrees
+    /// with the policy, applying it again must touch nothing. Without this,
+    /// every rendered frame re-enters GPUI through a synchronous focus event.
+    #[test]
+    fn a_satisfied_policy_requests_no_dom_focus_change() {
+        assert_eq!(focus_transition(true, FocusOwner::TextInput), None);
+        assert_eq!(focus_transition(false, FocusOwner::Canvas), None);
+    }
+
+    /// The complementary half: an unsatisfied policy must still act, or focus
+    /// would never reach the text input and text entry would be dead.
+    #[test]
+    fn an_unsatisfied_policy_always_requests_the_nominated_host() {
+        for owner in [FocusOwner::Neither, FocusOwner::Canvas] {
+            assert_eq!(
+                focus_transition(true, owner),
+                Some(FocusHost::TextInput),
+                "{owner:?}"
+            );
+        }
+        for owner in [FocusOwner::Neither, FocusOwner::TextInput] {
+            assert_eq!(
+                focus_transition(false, owner),
+                Some(FocusHost::Canvas),
+                "{owner:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
     use super::{FocusHost, focus_host};
 
     /// `bool` is a finite domain, so this exhausts it rather than sampling it.
