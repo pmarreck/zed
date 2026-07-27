@@ -59,6 +59,8 @@ pub(crate) struct WebWindowInner {
     pending_physical_size: Cell<Option<(u32, u32)>>,
     /// Coalesces deferred focus-policy passes to at most one outstanding.
     focus_sync_pending: Cell<bool>,
+    /// Characters that arrived while GPUI had no input handler installed.
+    pending_text: RefCell<String>,
 }
 
 pub struct WebWindow {
@@ -194,6 +196,7 @@ impl WebWindow {
             mql_handle: RefCell::new(None),
             pending_physical_size: Cell::new(None),
             focus_sync_pending: Cell::new(false),
+            pending_text: RefCell::new(String::new()),
         });
 
         let raf_closure = inner.create_raf_closure();
@@ -464,8 +467,36 @@ impl WebWindowInner {
         let closure = Closure::once_into_js(move || {
             this.focus_sync_pending.set(false);
             this.apply_focus_host_now();
+            this.flush_pending_text();
         });
         self.browser_window.queue_microtask(closure.unchecked_ref());
+    }
+
+    /// Inserts typed text, buffering it when GPUI has momentarily removed its
+    /// input handler as part of rendering.
+    ///
+    /// Dropping the character there loses keystrokes from a focused text field
+    /// with no error and no trace, which is invisible to the application and
+    /// maddening to a user. `set_input_handler` schedules the deferred pass
+    /// that replays them, so a buffered character is always eventually typed.
+    pub(crate) fn insert_text(self: &Rc<Self>, text: &str) {
+        let inserted = self.with_input_handler(|handler| handler.replace_text_in_range(None, text));
+        if inserted.is_none() {
+            self.pending_text.borrow_mut().push_str(text);
+        }
+    }
+
+    fn flush_pending_text(&self) {
+        if self.pending_text.borrow().is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut *self.pending_text.borrow_mut());
+        let inserted =
+            self.with_input_handler(|handler| handler.replace_text_in_range(None, &text));
+        if inserted.is_none() {
+            // Still no handler; keep the characters in order for the next pass.
+            self.pending_text.borrow_mut().insert_str(0, &text);
+        }
     }
 
     fn apply_focus_host_now(&self) {
