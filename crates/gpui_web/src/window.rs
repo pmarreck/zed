@@ -57,6 +57,8 @@ pub(crate) struct WebWindowInner {
     pub(crate) is_composing: Cell<bool>,
     mql_handle: RefCell<Option<MqlHandle>>,
     pending_physical_size: Cell<Option<(u32, u32)>>,
+    /// Coalesces deferred focus-policy passes to at most one outstanding.
+    focus_sync_pending: Cell<bool>,
 }
 
 pub struct WebWindow {
@@ -191,6 +193,7 @@ impl WebWindow {
             is_composing: Cell::new(false),
             mql_handle: RefCell::new(None),
             pending_physical_size: Cell::new(None),
+            focus_sync_pending: Cell::new(false),
         });
 
         let raf_closure = inner.create_raf_closure();
@@ -444,7 +447,28 @@ impl WebWindowInner {
         }
     }
 
-    pub(crate) fn apply_focus_host(&self) {
+    /// Requests a focus-policy pass outside the current DOM event dispatch.
+    ///
+    /// `focus()` and `blur()` fire their DOM events synchronously, and this
+    /// window's own focus listeners take the `callbacks` borrow that GPUI's
+    /// input dispatch is already holding when it reaches here — a guaranteed
+    /// `RefCell` panic. Deferring to a microtask lets the dispatch unwind
+    /// first. The pass is idempotent and re-reads live state, so a deferred
+    /// decision can never be a stale one, and repeated requests coalesce into
+    /// a single pass.
+    pub(crate) fn apply_focus_host(self: &Rc<Self>) {
+        if self.focus_sync_pending.replace(true) {
+            return;
+        }
+        let this = Rc::clone(self);
+        let closure = Closure::once_into_js(move || {
+            this.focus_sync_pending.set(false);
+            this.apply_focus_host_now();
+        });
+        self.browser_window.queue_microtask(closure.unchecked_ref());
+    }
+
+    fn apply_focus_host_now(&self) {
         // Do nothing when the DOM already satisfies the policy. GPUI installs
         // and removes its input handler as part of ordinary rendering, so an
         // unconditional focus()/blur() here fires synchronous DOM focus events
