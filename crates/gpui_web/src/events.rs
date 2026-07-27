@@ -486,7 +486,9 @@ impl WebWindowInner {
 
             if modifiers.is_subset_of(&Modifiers::shift()) {
                 if let Some(text) = key_char {
-                    this.insert_text(&text);
+                    this.with_input_handler(|handler| {
+                        handler.replace_text_in_range(None, &text);
+                    });
                 }
             }
         })
