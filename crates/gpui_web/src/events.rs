@@ -461,10 +461,17 @@ impl WebWindowInner {
                 key_char: key_char.clone(),
             };
 
+            // Let a focused text control outrank the keymap. GPUI swallows any
+            // keystroke that could begin a multi-key binding, so with this
+            // false a plain letter that happens to be a binding prefix was
+            // stolen from the text field and never typed. GPUI only honors the
+            // preference when an input handler exists and reports that it
+            // accepts text, which is exactly when a real text control is
+            // active; an application with no text control keeps every binding.
             let result = this.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
                 keystroke,
                 is_held,
-                prefer_character_input: false,
+                prefer_character_input: true,
             }));
 
             if let Some(result) = result {
