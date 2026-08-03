@@ -1,5 +1,6 @@
 use crate::display::WebDisplay;
 use crate::events::{ClickState, WebEventListeners, is_mac_platform};
+use crate::mouse_buttons::PointerDevice;
 use crate::focus_policy::{FocusHost, FocusOwner, focus_transition};
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
@@ -52,9 +53,10 @@ pub(crate) struct WebWindowInner {
     pub(crate) state: RefCell<WebWindowMutableState>,
     pub(crate) callbacks: RefCell<WebWindowCallbacks>,
     pub(crate) click_state: RefCell<ClickState>,
-    /// Latest touch/pen pointer edge as (x, y, time ms), consulted by the
-    /// mouse listeners to swallow iOS Safari's compatibility echo of a tap.
-    pub(crate) last_touch_contact: Cell<Option<(f32, f32, f64)>>,
+    /// Device class of the latest pointer activity, consulted by the mouse
+    /// listeners to swallow iOS Safari's compatibility echo of a tap. Starts
+    /// as Mouse: an echo cannot precede the touch that causes it.
+    pub(crate) last_pointer_device: Cell<PointerDevice>,
     pub(crate) last_physical_size: Cell<(u32, u32)>,
     pub(crate) notify_scale: Cell<bool>,
     pub(crate) is_composing: Cell<bool>,
@@ -191,7 +193,7 @@ impl WebWindow {
             state: RefCell::new(mutable_state),
             callbacks: RefCell::new(WebWindowCallbacks::default()),
             click_state: RefCell::new(ClickState::default()),
-            last_touch_contact: Cell::new(None),
+            last_pointer_device: Cell::new(PointerDevice::Mouse),
             last_physical_size: Cell::new((0, 0)),
             notify_scale: Cell::new(false),
             is_composing: Cell::new(false),

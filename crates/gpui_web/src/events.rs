@@ -10,7 +10,7 @@ use smallvec::smallvec;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    mouse_buttons::{dom_button_from_buttons, is_ghost_mouse_edge, should_handle_pointer_button_event},
+    mouse_buttons::{PointerDevice, dom_button_from_buttons, pointer_device_from_type, should_handle_pointer_button_event},
     window::WebWindowInner,
 };
 
@@ -168,19 +168,20 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointerdown", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.note_pointer_device(&event);
             // A pointer event collapses all mouse buttons into a single
             // active/inactive transition, so a chord's intermediate button
             // release never fires here. Mouse input is instead handled
             // per-button by the `mousedown`/`mouseup` listeners; ignore it on
             // this path. Touch and pen have no per-button model, so they keep
-            // using this path, and `preventDefault()` below cancels the
-            // compatibility mouse events they would otherwise emit, avoiding a
-            // double dispatch.
+            // using this path. Chromium also cancels their compatibility mouse
+            // events because of the `preventDefault()` below; WebKit does not,
+            // which is why the mouse listeners consult the pointer-device
+            // guard and the touch listeners cancel `touchstart`/`touchend`.
             if !should_handle_pointer_button_event(&event.pointer_type()) {
                 return;
             }
             event.prevent_default();
-            this.record_touch_contact(event.as_ref());
             this.dispatch_mouse_down(event.as_ref());
         })
     }
@@ -189,11 +190,11 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointerup", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.note_pointer_device(&event);
             if !should_handle_pointer_button_event(&event.pointer_type()) {
                 return;
             }
             event.prevent_default();
-            this.record_touch_contact(event.as_ref());
             this.dispatch_mouse_up(event.as_ref());
         })
     }
@@ -202,11 +203,11 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointercancel", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.note_pointer_device(&event);
             if !should_handle_pointer_button_event(&event.pointer_type()) {
                 return;
             }
             event.prevent_default();
-            this.record_touch_contact(event.as_ref());
             // GPUI has no separate pointer-cancel platform input. Treat a
             // cancelled touch/pen contact as an up edge so clients cannot
             // retain a logically pressed primary button indefinitely.
@@ -222,7 +223,7 @@ impl WebWindowInner {
             // A ghost echo of a touch must not dispatch - and must not reach
             // `apply_focus_host` either, or iOS Safari would refocus the hidden
             // input from a synthesized gesture and summon the software keyboard.
-            if this.is_ghost_mouse_edge_now(&event) {
+            if this.last_pointer_device.get() == PointerDevice::TouchOrPen {
                 return;
             }
             // Restore focus to whichever element the policy nominates, so a
@@ -240,32 +241,20 @@ impl WebWindowInner {
         self.listen("mouseup", move |event: JsValue| {
             let event: web_sys::MouseEvent = event.unchecked_into();
             event.prevent_default();
-            if this.is_ghost_mouse_edge_now(&event) {
+            if this.last_pointer_device.get() == PointerDevice::TouchOrPen {
                 return;
             }
             this.dispatch_mouse_up(&event);
         })
     }
 
-    /// Remembers the latest touch or pen edge so its compatibility mouse echo
-    /// can be recognized. Every edge updates the record because WebKit anchors
-    /// the echo at the lift point, which the last edge tracks by construction.
-    fn record_touch_contact(&self, event: &web_sys::MouseEvent) {
-        self.last_touch_contact.set(Some((
-            event.offset_x() as f32,
-            event.offset_y() as f32,
-            js_sys::Date::now(),
-        )));
-    }
-
-    /// Applies the pure ghost classifier to a live mouse edge.
-    fn is_ghost_mouse_edge_now(&self, event: &web_sys::MouseEvent) -> bool {
-        is_ghost_mouse_edge(
-            self.last_touch_contact.get(),
-            event.offset_x() as f32,
-            event.offset_y() as f32,
-            js_sys::Date::now(),
-        )
+    /// Advances the ghost-mouse guard: the latest pointer activity's device
+    /// class decides whether a following bare mouse edge is real. Runs before
+    /// the mouse-type filter so a real mouse press always flips the state via
+    /// its own pointer twin before its mousedown arrives.
+    fn note_pointer_device(&self, event: &web_sys::PointerEvent) {
+        self.last_pointer_device
+            .set(pointer_device_from_type(&event.pointer_type()));
     }
 
     /// iOS Safari decides whether to synthesize compatibility mouse events
@@ -344,6 +333,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointermove", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.note_pointer_device(&event);
             event.prevent_default();
 
             let position = pointer_position_in_element(&event);
