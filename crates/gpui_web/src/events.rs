@@ -10,7 +10,7 @@ use smallvec::smallvec;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    mouse_buttons::{dom_button_from_buttons, should_handle_pointer_button_event},
+    mouse_buttons::{dom_button_from_buttons, is_ghost_mouse_edge, should_handle_pointer_button_event},
     window::WebWindowInner,
 };
 
@@ -78,6 +78,7 @@ impl WebWindowInner {
             self.register_pointer_enter(),
             self.register_pointer_leave_hover(),
         ];
+        closures.extend(self.register_touch_default_suppression());
         closures.extend(self.register_visibility_change());
         closures.extend(self.register_appearance_change());
 
@@ -179,6 +180,7 @@ impl WebWindowInner {
                 return;
             }
             event.prevent_default();
+            this.record_touch_contact(event.as_ref());
             this.dispatch_mouse_down(event.as_ref());
         })
     }
@@ -191,6 +193,7 @@ impl WebWindowInner {
                 return;
             }
             event.prevent_default();
+            this.record_touch_contact(event.as_ref());
             this.dispatch_mouse_up(event.as_ref());
         })
     }
@@ -203,6 +206,7 @@ impl WebWindowInner {
                 return;
             }
             event.prevent_default();
+            this.record_touch_contact(event.as_ref());
             // GPUI has no separate pointer-cancel platform input. Treat a
             // cancelled touch/pen contact as an up edge so clients cannot
             // retain a logically pressed primary button indefinitely.
@@ -215,6 +219,12 @@ impl WebWindowInner {
         self.listen("mousedown", move |event: JsValue| {
             let event: web_sys::MouseEvent = event.unchecked_into();
             event.prevent_default();
+            // A ghost echo of a touch must not dispatch - and must not reach
+            // `apply_focus_host` either, or iOS Safari would refocus the hidden
+            // input from a synthesized gesture and summon the software keyboard.
+            if this.is_ghost_mouse_edge_now(&event) {
+                return;
+            }
             // Restore focus to whichever element the policy nominates, so a
             // real mouse press recovers key delivery after focus moved
             // elsewhere. This focuses the editable input only while a text/IME
@@ -230,8 +240,53 @@ impl WebWindowInner {
         self.listen("mouseup", move |event: JsValue| {
             let event: web_sys::MouseEvent = event.unchecked_into();
             event.prevent_default();
+            if this.is_ghost_mouse_edge_now(&event) {
+                return;
+            }
             this.dispatch_mouse_up(&event);
         })
+    }
+
+    /// Remembers the latest touch or pen edge so its compatibility mouse echo
+    /// can be recognized. Every edge updates the record because WebKit anchors
+    /// the echo at the lift point, which the last edge tracks by construction.
+    fn record_touch_contact(&self, event: &web_sys::MouseEvent) {
+        self.last_touch_contact.set(Some((
+            event.offset_x() as f32,
+            event.offset_y() as f32,
+            js_sys::Date::now(),
+        )));
+    }
+
+    /// Applies the pure ghost classifier to a live mouse edge.
+    fn is_ghost_mouse_edge_now(&self, event: &web_sys::MouseEvent) -> bool {
+        is_ghost_mouse_edge(
+            self.last_touch_contact.get(),
+            event.offset_x() as f32,
+            event.offset_y() as f32,
+            js_sys::Date::now(),
+        )
+    }
+
+    /// iOS Safari decides whether to synthesize compatibility mouse events
+    /// from the touch events, not the pointer events: `preventDefault()` on
+    /// `pointerdown` - the Pointer Events mechanism, which Chromium honors -
+    /// is ignored there, and the pair lands on hardware anyway. Cancelling
+    /// `touchstart`/`touchend` is the suppression WebKit actually implements;
+    /// the ghost guard in the mouse listeners stays as defence in depth for
+    /// engines that honor neither. Also stops double-tap zoom on the canvas.
+    fn register_touch_default_suppression(
+        self: &Rc<Self>,
+    ) -> Vec<Closure<dyn FnMut(JsValue)>> {
+        ["touchstart", "touchend"]
+            .into_iter()
+            .map(|name| {
+                self.listen_non_passive(name, move |event: JsValue| {
+                    let event: web_sys::Event = event.unchecked_into();
+                    event.prevent_default();
+                })
+            })
+            .collect()
     }
 
     fn dispatch_mouse_down(&self, event: &web_sys::MouseEvent) {
